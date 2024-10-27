@@ -20,6 +20,18 @@ function! flake8#Flake8UnplaceMarkers()
     call s:Warnings()
 endfunction
 
+function! flake8#Flake8ShowError()
+    call s:ShowErrorMessage()
+endfunction
+
+function! flake8#Flake8NextError()
+    call s:JumpNextError()
+endfunction
+
+function! flake8#Flake8PrevError()
+    call s:JumpPrevError()
+endfunction
+
 "" }}}
 
 "" ** internal ** {{{
@@ -101,6 +113,7 @@ function! s:Setup()  " {{{
     let s:markerdata['F'].marker = s:flake8_pyflake_marker
     let s:markerdata['C'].marker = s:flake8_complexity_marker
     let s:markerdata['N'].marker = s:flake8_naming_marker
+
 endfunction  " }}}
 
 "" do flake8
@@ -109,8 +122,10 @@ function! s:Flake8()  " {{{
     " read config
     call s:Setup()
 
-    if !executable(s:flake8_cmd)
-        echoerr "File " . s:flake8_cmd . " not found. Please install it first."
+    let l:executable = split(s:flake8_cmd)[0]
+
+    if !executable(l:executable)
+        echoerr "File " . l:executable . " not found. Please install it first."
         return
     endif
 
@@ -123,6 +138,8 @@ function! s:Flake8()  " {{{
     let l:old_gfm=&grepformat
     let l:old_gp=&grepprg
     let l:old_shellpipe=&shellpipe
+    let l:old_t_ti=&t_ti
+    let l:old_t_te=&t_te
 
     " write any changes before continuing
     if &readonly == 0
@@ -130,25 +147,40 @@ function! s:Flake8()  " {{{
     endif
 
     set lazyredraw   " delay redrawing
-    cclose           " close any existing cwindows
 
-    " set shellpipe to > instead of tee (suppressing output)
+    " prevent terminal from blinking
     set shellpipe=>
+    set t_ti=
+    set t_te=
 
     " perform the grep itself
-    let &grepformat="%f:%l:%c: %m\,%f:%l: %m"
+    let &grepformat="%f:%l:%c: %m\,%f:%l: %m,%-G%\\d"
     let &grepprg=s:flake8_cmd
     silent! grep! "%"
+    " close any existing cwindows,
+    " placed after 'grep' in case quickfix is open on autocmd QuickFixCmdPost
+    cclose
 
     " restore grep settings
     let &grepformat=l:old_gfm
     let &grepprg=l:old_gp
     let &shellpipe=l:old_shellpipe
+    let &t_ti=l:old_t_ti
+    let &t_te=l:old_t_te
+    " store mapping of line number to error string
 
     " process results
+    let s:resultDict = {} 
+
     let l:results=getqflist()
     let l:has_results=results != []
     if l:has_results
+	" save line number of each error message	
+        for result in l:results
+	    let linenum = result.lnum
+            let s:resultDict[linenum] = result.text
+	endfor
+
         " markers
         if !s:flake8_show_in_gutter == 0 || !s:flake8_show_in_file == 0
             call s:PlaceMarkers(l:results)
@@ -174,8 +206,8 @@ function! s:Flake8()  " {{{
     endif
 endfunction  " }}}
 
-"" markers
 
+"" markers
 function! s:PlaceMarkers(results)  " {{{
     " in gutter?
     if !s:flake8_show_in_gutter == 0
@@ -243,8 +275,85 @@ function! s:UnplaceMarkers()  " {{{
     endfor
 endfunction  " }}}
 
+function! s:ShowErrorMessage()  " {{{
+    let l:cursorPos = getpos(".")
+    if !exists('s:resultDict')
+	return
+    endif
+    if !exists('b:showing_message')
+	" ensure showing msg is always defined
+	let b:showing_message = ' '
+    endif
+
+    " if there is a message on the current line,
+    " then echo it 
+    if has_key(s:resultDict, l:cursorPos[1])
+	let l:errorText = get(s:resultDict, l:cursorPos[1]) 
+	echo strpart(l:errorText, 0, &columns-1)
+	let b:showing_message = 1
+    endif
+
+    " if a message is already being shown,
+    " then clear it
+    if !b:showing_message == 0
+	echo
+	let b:showing_message = 0
+    endif
+endfunction  " }}}
+
+function! s:JumpNextError()  " {{{
+    let l:cursorLine = getpos(".")[1]
+    if !exists('s:resultDict')
+	return
+    endif
+
+    " Convert list of strings to ints
+    let l:lineList = []
+    for line in keys(s:resultDict)
+	call insert(l:lineList, line+0)
+    endfor
+
+    let l:sortedLineList = sort(l:lineList, 'n')
+    for line in l:sortedLineList
+	let l:line_int = line + 0
+        if line	> l:cursorLine
+	    call cursor(line, 1)
+	    call s:ShowErrorMessage()
+	    return
+	endif
+    endfor
+    call cursor(l:cursorLine, 1)
+    echo "Reached last error!"
+
+endfunction  " }}}
+
+function! s:JumpPrevError()  " {{{
+    let l:cursorLine = getpos(".")[1]
+    if !exists('s:resultDict')
+	return
+    endif
+
+    " Convert list of strings to ints
+    let l:lineList = []
+    for line in keys(s:resultDict)
+	call insert(l:lineList, line+0)
+    endfor
+
+    let l:sortedLineList = reverse(sort(l:lineList, 'n'))
+    for line in l:sortedLineList
+	let l:line_int = line + 0
+        if line	< l:cursorLine
+	    call cursor(line, 1)
+	    call s:ShowErrorMessage()
+	    return
+	endif
+    endfor
+    call cursor(l:cursorLine, 1)
+    echo "Reached first error!"
+
+endfunction  " }}}
+
 "" }}}
 
 let &cpo = s:save_cpo
 unlet s:save_cpo
-

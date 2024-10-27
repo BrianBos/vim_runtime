@@ -1,6 +1,6 @@
 " abolish.vim - Language friendly searches, substitutions, and abbreviations
 " Maintainer:   Tim Pope <http://tpo.pe/>
-" Version:      1.1
+" Version:      1.2
 " GetLatestVimScripts: 1545 1 :AutoInstall: abolish.vim
 
 " Initialization {{{1
@@ -23,15 +23,15 @@ endif
 " }}}1
 " Utility functions {{{1
 
-function! s:function(name)
-  return function(substitute(a:name,'^s:',matchstr(expand('<sfile>'), '<SNR>\d\+_'),''))
+function! s:function(name) abort
+  return function(substitute(a:name,'^s:',matchstr(expand('<sfile>'), '.*\zs<SNR>\d\+_'),''))
 endfunction
 
 function! s:send(self,func,...)
   if type(a:func) == type('') || type(a:func) == type(0)
-    let Func = get(a:self,a:func,'')
+    let l:Func = get(a:self,a:func,'')
   else
-    let Func = a:func
+    let l:Func = a:func
   endif
   let s = type(a:self) == type({}) ? a:self : {}
   if type(Func) == type(function('tr'))
@@ -142,10 +142,6 @@ function! s:dotcase(word)
   return substitute(s:snakecase(a:word),'_','.','g')
 endfunction
 
-function! s:titlecase(word)
-  return substitute(s:spacecase(a:word), '\(\<\w\)','\=toupper(submatch(1))','g')
-endfunction
-
 call extend(Abolish, {
       \ 'camelcase':  s:function('s:camelcase'),
       \ 'mixedcase':  s:function('s:mixedcase'),
@@ -154,7 +150,6 @@ call extend(Abolish, {
       \ 'dashcase':   s:function('s:dashcase'),
       \ 'dotcase':    s:function('s:dotcase'),
       \ 'spacecase':  s:function('s:spacecase'),
-      \ 'titlecase':  s:function('s:titlecase')
       \ }, 'keep')
 
 function! s:create_dictionary(lhs,rhs,opts)
@@ -215,7 +210,6 @@ function! s:SubComplete(A,L,P)
 endfunction
 
 function! s:Complete(A,L,P)
-  let g:L = a:L
   " Vim bug: :Abolish -<Tab> calls this function with a:A equal to 0
   if a:A =~# '^[^/?-]' && type(a:A) != type(0)
     return join(s:words(),"\n")
@@ -285,7 +279,7 @@ function! s:parse_subvert(bang,line1,line2,count,args)
   else
     let args = a:args
   endif
-  let separator = matchstr(args,'^.')
+  let separator = '\v((\\)@<!(\\\\)*\\)@<!' . matchstr(args,'^.')
   let split = split(args,separator,1)[1:]
   if a:count || split == [""]
     return s:parse_substitute(a:bang,a:line1,a:line2,a:count,split)
@@ -314,7 +308,6 @@ function! s:normalize_options(flags)
     let opts = {}
     let flags = a:flags
   endif
-  let g:op1 = copy(opts)
   if flags =~# 'w'
     let opts.boundaries = 2
   elseif flags =~# 'v'
@@ -324,7 +317,6 @@ function! s:normalize_options(flags)
   endif
   let opts.case = (flags !~# 'I' ? get(opts,'case',1) : 0)
   let opts.flags = substitute(flags,'\C[avIiw]','','g')
-  let g:op2 = copy(opts)
   return opts
 endfunction
 
@@ -385,7 +377,7 @@ function! s:find_command(cmd,flags,word)
   " beginning of the line, and we can't use position flags (e.g., /foo/e).
   " If we use :norm /pattern, we leave ourselves vulnerable to "press enter"
   " prompts (even with :silent).
-  let cmd = (a:cmd =~ '[?!]' ? '?' : '/')
+  let cmd = (a:cmd =~ '[?!]$' ? '?' : '/')
   let @/ = s:pattern(dict,opts.boundaries)
   if opts.flags == "" || !search(@/,'n')
     return "norm! ".cmd."\<CR>"
@@ -402,6 +394,8 @@ function! s:grep_command(args,bang,flags,word)
   let dict = s:create_dictionary(a:word,"",opts)
   if &grepprg == "internal"
     let lhs = "'".s:pattern(dict,opts.boundaries)."'"
+  elseif &grepprg =~# '^rg\|^ag'
+    let lhs = "'".s:egrep_pattern(dict,opts.boundaries)."'"
   else
     let lhs = "-E '".s:egrep_pattern(dict,opts.boundaries)."'"
   endif
@@ -527,7 +521,7 @@ function! s:commands.abbrev.process(bang,line1,line2,count,args)
     let cmd = cmd . " <buffer>"
   endif
   let [bad, good] = s:badgood(a:args)
-  if substitute(bad,'{.\{-\}.}','','g') !~ '^\k\+$'
+  if substitute(bad, '[{},]', '', 'g') !~# '^\k*$'
     call s:throw("E474: Invalid argument (not a keyword: ".string(bad).")")
   endif
   if !self.options.delete && good == ""
@@ -566,6 +560,7 @@ endfunction
 call extend(Abolish.Coercions, {
       \ 'c': Abolish.camelcase,
       \ 'm': Abolish.mixedcase,
+      \ 'p': Abolish.mixedcase,
       \ 's': Abolish.snakecase,
       \ '_': Abolish.snakecase,
       \ 'u': Abolish.uppercase,
@@ -574,49 +569,57 @@ call extend(Abolish.Coercions, {
       \ 'k': Abolish.dashcase,
       \ '.': Abolish.dotcase,
       \ ' ': Abolish.spacecase,
-      \ 't': Abolish.titlecase,
       \ "function missing": s:function("s:unknown_coercion")
       \}, "keep")
 
-function! s:coerce(transformation)
+function! s:coerce(type) abort
+  if a:type !~# '^\%(line\|char\|block\)'
+    let s:transformation = a:type
+    let &opfunc = matchstr(expand('<sfile>'), '<SNR>\w*')
+    return 'g@'
+  endif
+  let selection = &selection
   let clipboard = &clipboard
   try
-    set clipboard=
+    set selection=inclusive clipboard-=unnamed clipboard-=unnamedplus
     let regbody = getreg('"')
     let regtype = getregtype('"')
     let c = v:count1
+    let begin = getcurpos()
     while c > 0
       let c -= 1
-      norm! yiw
-      let word = @@
-      let @@ = s:send(g:Abolish.Coercions,a:transformation,word)
-      if !exists('begin')
-        let begin = getpos("'[")
+      if a:type ==# 'line'
+        let move = "'[V']"
+      elseif a:type ==# 'block'
+        let move = "`[\<C-V>`]"
+      else
+        let move = "`[v`]"
       endif
+      silent exe 'normal!' move.'y'
+      let word = @@
+      let @@ = s:send(g:Abolish.Coercions,s:transformation,word)
       if word !=# @@
         let changed = 1
-        norm! viwpw
-      else
-        norm! w
+        exe 'normal!' move.'p'
       endif
     endwhile
     call setreg('"',regbody,regtype)
     call setpos("'[",begin)
     call setpos(".",begin)
-    if exists("changed")
-      silent! call repeat#set("\<Plug>Coerce".a:transformation)
-    endif
   finally
+    let &selection = selection
     let &clipboard = clipboard
   endtry
 endfunction
 
-nnoremap <silent> <Plug>Coerce :<C-U>call <SID>coerce(nr2char(getchar()))<CR>
+nnoremap <expr> <Plug>(abolish-coerce) <SID>coerce(nr2char(getchar()))
+vnoremap <expr> <Plug>(abolish-coerce) <SID>coerce(nr2char(getchar()))
+nnoremap <expr> <Plug>(abolish-coerce-word) <SID>coerce(nr2char(getchar())).'iw'
 
 " }}}1
 
 if !exists("g:abolish_no_mappings") || ! g:abolish_no_mappings
-  nmap cr  <Plug>Coerce
+  nmap cr  <Plug>(abolish-coerce-word)
 endif
 
 command! -nargs=+ -bang -bar -range=0 -complete=custom,s:Complete Abolish
